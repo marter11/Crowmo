@@ -163,8 +163,8 @@ bridge* camera_feed_bridge()
 
   if(fork() == 0) {
 
-    char* video_stream = (char*)malloc(65534*35);
-    char* stream_data = (char*)malloc(65535); // stream data here means NALU
+    char* stream_frame = (char*)malloc(65534*35);
+    char* nal_unit = (char*)malloc(65535); // stream data here means NALU
     RTP_HEADER rtp_header;
     H264Header h264_header;
 
@@ -172,46 +172,80 @@ bridge* camera_feed_bridge()
 
     printf("%d %d\n", stream_pointer, valid_packet_started);
 
-    // NOTE: there might be padding indicated by the RTP header properties
-    while(1) {
-      memset(stream_data, 65535, 0);
+    char* sps = (char*)malloc(100);
+    char* pps = (char*)malloc(100);
 
-      // recv_len = recvfrom(sockfd, stream_data, 6556, 0, (struct sockaddr*)&camera_client, (socklen_t*)sizeof(camera_client));
-      recv_len = recvfrom(sockfd, stream_data, 65534, 0, NULL, NULL);
+    // sps_set aand pps_set contains length; if == 0 then sps or pps is not received
+    int sps_set = 0, pps_set = 0;
+
+    // NOTE: there might be padding indicated by the RTP header properties
+    FILE* f = fopen("img.bin", "wb");
+    int alma = 2;
+    while(alma) {
+      memset(nal_unit, 65535, 0);
+
+      // recv_len = recvfrom(sockfd, nal_unit, 6556, 0, (struct sockaddr*)&camera_client, (socklen_t*)sizeof(camera_client));
+      recv_len = recvfrom(sockfd, nal_unit, 65534, 0, NULL, NULL);
       if(recv_len < 8) puts("RTP header is missing!");
 
-      if(ParseRTPHeader(&rtp_header, stream_data) != 0) continue;
-      if(ParseH264Header(&h264_header, stream_data+RTP_HEADER_LEN) != 0 ) continue;
+      if(ParseRTPHeader(&rtp_header, nal_unit) != 0) continue;
+      if(ParseH264Header(&h264_header, nal_unit+RTP_HEADER_LEN) != 0 ) continue;
 
-      // if(h264_header.type == 7) puts("fadasdas --------- ");
-      // if(h264_header.type != 28 || h264_header.type != 7 || h264_header.type != 8) continue;
-      if(h264_header.type != 28 && h264_header.type != 7 && h264_header.type != 8) continue;
-      printf("%d %d type -------- \n", h264_header.type, h264_header.boundary_bit);
+
+      switch(h264_header.type) {
+        case 7:
+          memset(sps, 0, 100);
+          sps[3] = 1;
+          sps_set = recv_len-RTP_HEADER_LEN+4;
+          memcpy(sps+4, nal_unit+RTP_HEADER_LEN, recv_len-RTP_HEADER_LEN);
+          break;
+
+        case 8:
+          memset(pps, 0, 100);
+          pps[3] = 1;
+          pps_set = recv_len-RTP_HEADER_LEN+4;
+          memcpy(pps+4, nal_unit+RTP_HEADER_LEN, recv_len-RTP_HEADER_LEN);
+          break;
+      }
+
+      // if(h264_header.type != 28 && h264_header.type != 7 && h264_header.type != 8) continue;
+      if(h264_header.type != 28) continue;
 
       if(h264_header.boundary_bit == 1 && !valid_packet_started) {
         valid_packet_started = 1;
-        memset(video_stream, 65535*35, 0);
-        video_stream[3] = 0x1;
+        memset(stream_frame, 0, 65535*35);
 
+        if(sps_set && pps_set) {
+
+          memcpy(stream_frame, sps, sps_set);
+          memcpy(stream_frame+sps_set, pps, pps_set);
+
+          stream_pointer += sps_set+pps_set;
+          sps_set = pps_set = 0;
+        }
+
+        stream_frame[stream_pointer-1] = 0x1;
         puts("Started valid");
       }
 
       if(valid_packet_started) {
 
-        puts("valid_packet_started");
-        // memcpy(video_stream+stream_pointer, stream_data+RTP_HEADER_LEN+2, recv_len);
-
         #define DEC RTP_HEADER_LEN
-        memcpy(video_stream+stream_pointer, stream_data+DEC, recv_len-DEC);
+        memcpy(stream_frame+stream_pointer, nal_unit+DEC, recv_len-DEC);
         stream_pointer += recv_len-DEC-4;
 
         if(h264_header.boundary_bit == 2) {
           puts("end of boundary");
           valid_packet_started = 0;
-          FILE* f = fopen("img.bin", "wb");
-          fwrite(video_stream, 1, stream_pointer, f);
-          fclose(f);
-          break;
+          // FILE* f = fopen("img.bin", "wb");
+          fwrite(stream_frame, 1, stream_pointer, f);
+          // fclose(f);
+          // break;
+
+          stream_pointer = 4;
+          memset(stream_frame, 0, 65534*35);
+
+          alma--;
         }
       }
 
@@ -219,8 +253,11 @@ bridge* camera_feed_bridge()
 
     }
 
-    free(stream_data);
-    free(video_stream);
+    fclose(f);
+    free(nal_unit);
+    free(stream_frame);
+    free(pps);
+    free(sps);
 
     puts("END");
     exit(0);
